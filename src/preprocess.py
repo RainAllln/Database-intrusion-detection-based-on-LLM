@@ -17,6 +17,5 @@ class SQLPreprocessor:
         return sql
 
     def get_ast_sequence(self, sql):
-        """扩展：如果未来你想尝试AST展平序列，可以在此实现 """
         # 预留给未来择优方案
         pass

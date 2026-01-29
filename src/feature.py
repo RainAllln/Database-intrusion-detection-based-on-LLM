@@ -11,9 +11,9 @@ class SQLEmbedder:
         
         # 打印明确的设备信息
         if self.device.type == 'cuda':
-            print(f"✅ 模型利用 GPU 加速中: {torch.cuda.get_device_name(0)}")
+            print(f"模型利用 GPU 加速中: {torch.cuda.get_device_name(0)}")
         else:
-            print("⚠️ 未检测到 GPU，正在使用 CPU (速度较慢)")
+            print("未检测到 GPU，正在使用 CPU")
 
     def get_embeddings(self, texts, batch_size=16):
         """捕捉SQL的深层语义特征"""

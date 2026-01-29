@@ -58,7 +58,7 @@ def plot_metrics(y_true, y_pred, scores, output_dir):
 
 def main():
     # 1. 加载与预处理
-    # 尝试使用 utf-16 编码读取，因为报错提示首字节为 0xff
+    # 尝试使用 utf-16 编码读取
     try:
         # df = pd.read_csv('data/raw/sqlInjection/sqli.csv', encoding='utf-16')
         df = pd.read_csv('data/custom/custom_dataset.csv', encoding='utf-16') # 读取我生成的数据集
@@ -76,10 +76,10 @@ def main():
 
     # 2. 标签逻辑调整 (针对三分类)
     # 第一层模型：只管检测是否为 SQL 注入 (Label 1)
-    # 我们将 Label 0 和 2 都视为“语法层面的正常” (即非注入)
+    # 将 Label 0 和 2 都视为“语法层面的正常” (即非注入)
     y_for_layer1 = df['Label'].apply(lambda x: 1 if x == 1 else 0).values
 
-    # 3. 特征提取 (保持不变，但 batch_size 建议设为 128 以发挥 3060 性能)
+    # 3. 特征提取
     embedder = SQLEmbedder()
     run_batch_size = 128 if torch.cuda.is_available() else 32
     embeddings = embedder.get_embeddings(df['clean_query'].values, batch_size=run_batch_size)
@@ -117,7 +117,6 @@ def main():
 
     # 孤立森林输出: -1(异常/攻击), 1(正常)
     # 真实标签: 1(攻击), 0(正常)
-    # 映射预测结果以匹配真实标签
     y_pred_mapped = [1 if p == -1 else 0 for p in preds]
 
     # 绘制图表

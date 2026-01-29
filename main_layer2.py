@@ -18,7 +18,6 @@ def main_layer2():
 
     print(f"正在读取数据集: {data_path}")
     try:
-        # 尝试不同的编码以兼容 Windows/Linux 创建的文件
         df = pd.read_csv(data_path, encoding='utf-8')
     except (UnicodeError, FileNotFoundError, Exception):
         try:
@@ -36,7 +35,7 @@ def main_layer2():
     # --- 2. 创建实验文件夹---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     # 假设 role 总是 0, 1, 2, 3，所以 num_roles=4
-    # 如果数据里可能缺角色，可以用 len(df_l2['role'].unique())
+    # 可以用 len(df_l2['role'].unique())
     num_roles = 4
 
     # 命名规范：exp2_[时间戳]
@@ -49,7 +48,7 @@ def main_layer2():
     preprocessor = SQLPreprocessor()
     embedder = SQLEmbedder()
 
-    print("正在提取语义特征 (DistilBERT)... 这可能需要一点时间。")
+    print("正在提取语义特征 (DistilBERT)。")
     # 简单清洗
     df_l2['clean_query'] = df_l2['query'].astype(str).apply(preprocessor.normalize)
 
@@ -174,15 +173,14 @@ def main_layer2():
             # Confidence 是预测角色的概率值
             confidence = probs[i][pred_role]
 
-            # 判断逻辑：如果 真实角色 != 预测角色，这可能就是我们伪造的 "越权(Label 2)"
-            # 在 Layer 2 中，不匹配是一种信号
+            # 判断逻辑：如果 真实角色 != 预测角色，这可能就是伪造的 "越权(Label 2)"
             is_match = (actual_role == pred_role)
             res_mark = "MATCH" if is_match else "MISMATCH"
 
             f.write(
                 f"{i:<5} | {actual_role:<10} | {pred_role:<10} | {res_mark:<8} | {confidence:.4f}     | {query_clip}\n")
 
-    print(f"Layer 2 实验顺利完成！请查看: {output_dir}")
+    print(f"Layer 2 实验完成！请查看: {output_dir}")
 
 
 if __name__ == "__main__":
