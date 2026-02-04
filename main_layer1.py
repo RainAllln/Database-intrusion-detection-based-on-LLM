@@ -7,8 +7,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score, classification_report, roc_auc_score, confusion_matrix, roc_curve
-from src import SQLPreprocessor, SQLEmbedder
-from src.detector_layer1 import Layer1Detector
+from src import SQLPreprocessor, SQLEmbedder, Layer1Detector
 
 
 def plot_metrics(y_true, y_pred, scores, output_dir):
@@ -93,7 +92,7 @@ def main():
 
     contamination_rate = 0.05  # 假设预期误报率为 5%
 
-    l1_detector = Layer1Detector(contamination_rate)
+    l1_detector = Layer1Detector(model_name="isolation_forest")
 
     l1_detector.train(X_train_normal)
 
@@ -108,7 +107,7 @@ def main():
     
     print(f"初始化孤立森林，仅使用正常样本训练，污染率参数(预期误报): {contamination_rate:.4f}")
     print(f"训练样本数 (Normal Only): {len(X_train_normal)}")
-    l1_detector = Layer1Detector(contamination=contamination_rate)
+    l1_detector = Layer1Detector(model_name="isolation_forest")
     l1_detector.train(X_train_normal)
 
     # 5. 在测试集上评估

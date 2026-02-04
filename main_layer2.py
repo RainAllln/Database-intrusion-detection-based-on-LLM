@@ -8,8 +8,7 @@ from datetime import datetime
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-from src.detector_layer2 import Layer2Classifier
-from src import SQLPreprocessor, SQLEmbedder
+from src import SQLPreprocessor, SQLEmbedder, Layer2Classifier
 
 
 def main_layer2():
@@ -74,7 +73,7 @@ def main_layer2():
 
     # --- 5. 模型训练 ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = Layer2Classifier(num_roles=num_roles).to(device)
+    model = Layer2Classifier(model_name="mlp", num_roles=num_roles).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     criterion = torch.nn.CrossEntropyLoss()
 
