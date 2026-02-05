@@ -1,4 +1,5 @@
 import re
+import sqlparse
 
 class SQLPreprocessor:
     def __init__(self):
@@ -17,5 +18,23 @@ class SQLPreprocessor:
         return sql
 
     def get_ast_sequence(self, sql):
-        # 预留给未来择优方案
-        pass
+        """将SQL解析为token序列（AST展平）"""
+        if not isinstance(sql, str): return []
+        parsed = sqlparse.parse(sql)
+        if not parsed:
+            return []
+        tokens = []
+
+        def flatten(token_list):
+            for token in token_list:
+                if token.is_group:
+                    yield from flatten(token.tokens)
+                else:
+                    # 只保留有意义的token
+                    val = token.value.strip()
+                    if val:
+                        yield val.lower()
+
+        for stmt in parsed:
+            tokens.extend(flatten(stmt.tokens))
+        return tokens

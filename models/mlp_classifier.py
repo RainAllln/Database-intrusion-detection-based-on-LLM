@@ -2,7 +2,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class MLPClassifier(nn.Module):
-    def __init__(self, input_dim=768, num_roles=4):
+    def __init__(self, input_dim=772, num_roles=4):
         super(MLPClassifier, self).__init__()
         self.main = nn.Sequential(
             nn.Linear(input_dim, 512),
