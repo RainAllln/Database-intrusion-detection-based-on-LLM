@@ -8,51 +8,7 @@ import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score, classification_report, roc_auc_score, confusion_matrix, roc_curve
 from src import SQLPreprocessor, SQLEmbedder, Layer1Detector
-
-
-def plot_metrics(y_true, y_pred, scores, output_dir):
-    """绘制并保存评估图表"""
-    # 1. 混淆矩阵
-    cm = confusion_matrix(y_true, y_pred)
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=['Normal', 'Attack'], yticklabels=['Normal', 'Attack'])
-    plt.title('Confusion Matrix')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    
-    save_path = os.path.join(output_dir, 'confusion_matrix.png')
-    plt.savefig(save_path)
-    print(f"图表已保存: {save_path}")
-    plt.close()
-
-    # 2. ROC 曲线
-    fpr, tpr, _ = roc_curve(y_true, -scores) # 注意 scores 取负
-    plt.figure(figsize=(6, 5))
-    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc_score(y_true, -scores):.2f})')
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('Receiver Operating Characteristic (ROC)')
-    plt.legend(loc="lower right")
-    
-    save_path = os.path.join(output_dir, 'roc_curve.png')
-    plt.savefig(save_path)
-    print(f"图表已保存: {save_path}")
-    plt.close()
-
-    # 3. 分数分布图
-    plt.figure(figsize=(8, 5))
-    df_res = pd.DataFrame({'Score': scores, 'Label': y_true})
-    sns.histplot(data=df_res, x='Score', hue='Label', element="step", stat="density", common_norm=False, bins=30)
-    plt.title('Anomaly Score Distribution (Layer 1)')
-    plt.xlabel('Anomaly Score (Lower is more anomalous)')
-    
-    save_path = os.path.join(output_dir, 'score_dist.png')
-    plt.savefig(save_path)
-    print(f"图表已保存: {save_path}")
-    plt.close()
+from src.utils import plot_confusion_matrix, plot_roc_curve, plot_score_distribution, write_experiment_report
 
 
 def main():
@@ -69,7 +25,9 @@ def main():
     preprocessor = SQLPreprocessor()
     # 修改列名为 'query' 以匹配 csv 文件头
     df['clean_query'] = df['query'].apply(preprocessor.normalize)
-    
+    # 新增：AST展平SQL
+    df['ast_query'] = df['query'].apply(lambda x: " ".join(preprocessor.get_ast_sequence(x)))
+
     # 确保 Label 是数值型 (2：伪装攻击， 1：注入攻击，0：正常)
     df['Label'] = pd.to_numeric(df['Label'], errors='coerce').fillna(0).astype(int)
 
@@ -81,7 +39,9 @@ def main():
     # 3. 特征提取
     embedder = SQLEmbedder()
     run_batch_size = 128 if torch.cuda.is_available() else 32
-    embeddings = embedder.get_embeddings(df['clean_query'].values, batch_size=run_batch_size)
+    # 可选：用AST特征或normalize特征
+    # embeddings = embedder.get_embeddings(df['clean_query'].values, batch_size=run_batch_size)
+    embeddings = embedder.get_embeddings(df['ast_query'].values, batch_size=run_batch_size)
 
     # 4. 划分训练集
     X_train, X_test, y_train, y_test = train_test_split(embeddings, y_for_layer1, test_size=0.2, random_state=42)
@@ -119,7 +79,9 @@ def main():
     y_pred_mapped = [1 if p == -1 else 0 for p in preds]
 
     # 绘制图表
-    plot_metrics(y_test, y_pred_mapped, scores, output_dir)
+    plot_confusion_matrix(y_test, y_pred_mapped, output_dir, labels=['Normal', 'Attack'])
+    plot_roc_curve(y_test, scores, output_dir)
+    plot_score_distribution(y_test, scores, output_dir)
 
     # --- 计算指标 ---
     acc = accuracy_score(y_test, y_pred_mapped)
@@ -141,33 +103,22 @@ def main():
     
     # --- 保存实验参数与结果到 TXT ---
     report_path = os.path.join(output_dir, 'experiment_report.txt')
-    # 获取 Sklearn 模型的参数
-    model_params = l1_detector.model.get_params()
-    
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write("=== SQL Detection Layer 1 Experiment Report ===\n")
-        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        
-        f.write("--- Data Info ---\n")
-        f.write(f"Total Samples: {len(X)}\n")
-        f.write(f"Training Strategy: Semi-Supervised (Normal Samples Only)\n")
-        f.write(f"Training Samples Used: {len(X_train_normal)}\n")
-        f.write(f"Test Samples: {len(X_test)}\n\n")
-        
-        f.write("--- Model Parameters (Isolation Forest) ---\n")
-        for k, v in model_params.items():
-            f.write(f"{k}: {v}\n")
-        f.write("\n")
-        
-        f.write("--- Evaluation Metrics ---\n")
-        f.write(f"Accuracy: {acc:.4f}\n")
-        f.write(f"F1 Score: {f1:.4f}\n")
-        f.write(f"ROC-AUC Score: {roc_score if isinstance(roc_score, str) else f'{roc_score:.4f}'}\n\n")
-        
-        f.write("--- Classification Report ---\n")
-        f.write(cls_report)
-        
-    print(f"实验参数与结果已写入: {report_path}")
+    report_content = (
+        "=== SQL Detection Layer 1 Experiment Report ===\n"
+        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        "--- Data Info ---\n"
+        f"Total Samples: {len(X_train) + len(X_test)}\n"
+        "Training Strategy: Semi-Supervised (Normal Samples Only)\n"
+        f"Training Samples Used: {len(X_train)}\n"
+        f"Test Samples: {len(X_test)}\n\n"
+        "--- Evaluation Metrics ---\n"
+        f"Accuracy: {acc:.4f}\n"
+        f"F1 Score: {f1:.4f}\n"
+        f"ROC-AUC Score: {roc_score if isinstance(roc_score, str) else f'{roc_score:.4f}'}\n\n"
+        "--- Classification Report ---\n"
+        f"{cls_report}"
+    )
+    write_experiment_report(report_path, report_content)
 
     # 模拟单个新查询测试
     new_query = "SELECT * FROM users WHERE id = 1 OR 1=1 --"

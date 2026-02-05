@@ -9,7 +9,42 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 from src import SQLPreprocessor, SQLEmbedder, Layer2Classifier
+from sklearn.metrics.pairwise import cosine_similarity
+import faiss
+from src.utils import (
+    plot_confusion_matrix, plot_loss_curve, write_classification_report, write_detail_log
+)
 
+def build_role_knowledge_base_faiss(X_train, y_train, labels_train, num_roles):
+    # 只存储正常SQL（Label==0），每个角色一个FAISS索引
+    mask = (labels_train == 0)
+    kb = {}
+    X_train_np = X_train.cpu().numpy() if isinstance(X_train, torch.Tensor) else X_train
+    y_train_np = y_train.cpu().numpy() if isinstance(y_train, torch.Tensor) else y_train
+    dim = X_train_np.shape[1]
+    for r in range(num_roles):
+        idx = (y_train_np[mask] == r)
+        vecs = X_train_np[mask][idx]
+        if vecs.shape[0] == 0:
+            # 空索引，填充一个全零向量
+            index = faiss.IndexFlatL2(dim)
+            index.add(np.zeros((1, dim), dtype='float32'))
+        else:
+            index = faiss.IndexFlatL2(dim)
+            index.add(vecs.astype('float32'))
+        kb[r] = index
+    return kb
+
+def get_max_similarities_faiss(sql_emb, kb, num_roles):
+    # 对每个角色知识库FAISS索引，计算最大相似度（L2距离转相似度）
+    sims = []
+    emb = sql_emb.astype('float32').reshape(1, -1)
+    for r in range(num_roles):
+        D, _ = kb[r].search(emb, 1)  # D: (1,1) 最小距离
+        # 距离转相似度（越小越相似，这里用负距离或exp(-d)都可）
+        sim = float(np.exp(-D[0][0]))
+        sims.append(sim)
+    return np.array(sims)
 
 def main_layer2():
     # --- 1. 加载与预处理  ---
@@ -50,15 +85,19 @@ def main_layer2():
     print("正在提取语义特征 (DistilBERT)。")
     # 简单清洗
     df_l2['clean_query'] = df_l2['query'].astype(str).apply(preprocessor.normalize)
+    # 新增：AST展平SQL
+    df_l2['ast_query'] = df_l2['query'].astype(str).apply(lambda x: " ".join(preprocessor.get_ast_sequence(x)))
 
     # 提取 Embedding
-    X_embeddings = embedder.get_embeddings(df_l2['clean_query'].values, batch_size=128)
+    # 可选：用AST特征或normalize特征
+    # X_embeddings = embedder.get_embeddings(df_l2['clean_query'].values, batch_size=128)
+    X_embeddings = embedder.get_embeddings(df_l2['ast_query'].values, batch_size=128)
     # y 标签在这里是 role，训练模型去识别这个语句属于哪个角色
     y_roles = torch.tensor(df_l2['role'].values).long()
 
     # --- 4. 划分数据集 ---
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_embeddings, y_roles, test_size=0.2, random_state=42
+    X_train, X_test, y_train, y_test, labels_train, labels_test = train_test_split(
+        X_embeddings, y_roles, df_l2['Label'].values, test_size=0.2, random_state=42
     )
 
     # 转换为 Tensor
@@ -71,13 +110,26 @@ def main_layer2():
     if not isinstance(y_test, torch.Tensor):
         y_test = torch.tensor(y_test, dtype=torch.long)
 
-    # --- 5. 模型训练 ---
+    # --- 设备定义提前 ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # --- RAG知识库构建（FAISS） ---
+    print("正在用FAISS构建RAG角色知识库...")
+    role_kb = build_role_knowledge_base_faiss(X_train, y_train, labels_train, num_roles)
+
+    # === 修正：训练时也拼接RAG特征 ===
+    rag_features_train = []
+    for emb in X_train.cpu().numpy():
+        rag_features_train.append(get_max_similarities_faiss(emb, role_kb, num_roles))
+    rag_features_train = np.array(rag_features_train)  # shape: (N, 4)
+    X_train_rag = torch.tensor(np.concatenate([X_train.cpu().numpy(), rag_features_train], axis=1), dtype=torch.float32).to(device)
+
+    # --- 5. 模型训练 ---
     model = Layer2Classifier(model_name="mlp", num_roles=num_roles).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     criterion = torch.nn.CrossEntropyLoss()
 
-    train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=32, shuffle=True)
+    train_loader = DataLoader(TensorDataset(X_train_rag, y_train), batch_size=32, shuffle=True)
 
     print(f"正在训练角色行为模型 (Epochs: 15, Device: {device})...")
     model.train()
@@ -100,84 +152,106 @@ def main_layer2():
             print(f"Epoch [{epoch + 1}/15], Loss: {avg_loss:.4f}")
 
     # 保存 Loss 曲线
-    plt.figure()
-    plt.plot(loss_history, label='Training Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Layer 2 Training Loss')
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, 'training_loss.png'))
-    plt.close()
+    plot_loss_curve(loss_history, output_dir, filename='training_loss.png', title='Layer 2 Training Loss')
 
     # --- 6. 测验与实验结果生成 ---
     model.eval()
     with torch.no_grad():
-        test_outputs = model(X_test.to(device))
+        # 计算RAG相似度特征（FAISS）
+        rag_features = []
+        for emb in X_test.cpu().numpy():
+            rag_features.append(get_max_similarities_faiss(emb, role_kb, num_roles))
+        rag_features = np.array(rag_features)  # shape: (N, 4)
+        # 拼接到BERT特征
+        X_test_rag = torch.tensor(np.concatenate([X_test.cpu().numpy(), rag_features], axis=1), dtype=torch.float32).to(device)
+        test_outputs = model(X_test_rag)
         _, y_pred = torch.max(test_outputs, 1)
         y_pred = y_pred.cpu().numpy()
         y_true = y_test.numpy()
 
+    # 动态危险操作判别 + 角色预测判别
+    print("正在进行动态危险操作判别与角色预测...")
+    # 获取测试集对应的原始索引
+    test_indices = X_test.cpu().numpy().shape[0]
+    test_queries = df_l2.iloc[-test_indices:]['query'].values
+    test_roles = df_l2.iloc[-test_indices:]['role'].values
+    test_labels = labels_test
+
+    final_pred = []
+    rag_threshold = 0.7  # 可调阈值
+    for i, (query, true_role, pred_role) in enumerate(zip(test_queries, test_roles, y_pred)):
+        rag_sim = rag_features[i][true_role]
+        # 1. RAG一致性判定
+        if rag_sim < rag_threshold:
+            final_pred.append(2)  # 判为伪装攻击
+            continue
+        # 2. 角色预测判定
+        if pred_role != true_role:
+            final_pred.append(2)
+        else:
+            final_pred.append(0)
+
+    final_pred = np.array(final_pred)
+    # 只统计预测为正常的准确率
+    mask = (final_pred == 0)
+    acc = np.mean(test_labels[mask] == 0) if np.sum(mask) > 0 else 0
+
+    print(f"最终通过语句数: {np.sum(mask)} / {len(final_pred)}")
+    print(f"最终准确率（通过语句与Label=0的重合度）: {acc:.4f}")
+
     # 绘制混淆矩阵（颜色改成绿色，与layer1隔开）
-    cm = confusion_matrix(y_true, y_pred)
-    plt.figure(figsize=(8, 6))
-    role_labels = [f'R{i}' for i in range(num_roles)]
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Greens',
-                xticklabels=role_labels, yticklabels=role_labels)
-    plt.title('Layer 2: Role Accountability Matrix')
-    plt.ylabel('True Role (Who issued it)')
-    plt.xlabel('Predicted Role (Who SHOULD issue it)')
-    plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
-    plt.close()
+    plot_confusion_matrix(
+        y_true, y_pred, output_dir,
+        labels=[f'R{i}' for i in range(num_roles)],
+        filename='confusion_matrix.png',
+        cmap='Greens',
+        title='Layer 2: Role Accountability Matrix'
+    )
 
     # 保存分类报告 TXT
-    report = classification_report(y_true, y_pred, target_names=role_labels)
-    acc = accuracy_score(y_true, y_pred)
+    write_classification_report(
+        y_true, y_pred, output_dir,
+        labels=[f'R{i}' for i in range(num_roles)],
+        filename='layer2_report.txt',
+        note="This model predicts which role 'usually' writes such SQL.\nIf True Role != Predicted Role, it might be a violation."
+    )
 
-    report_path = os.path.join(output_dir, 'layer2_report.txt')
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write("=== SQL Detection Layer 2 (Role Perception) Report ===\n")
-        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Total L2 Samples (Train+Test): {len(df_l2)}\n")
-        f.write(f"Test Set Accuracy: {acc:.4f}\n")
-        f.write("Note: This model predicts which role 'usually' writes such SQL.\n")
-        f.write("      If True Role != Predicted Role, it might be a violation.\n\n")
-        f.write("--- Classification Report ---\n")
-        f.write(report)
-
-    # --- 7. 生成详细推理日志 (前100条) ---
+    # --- 7. 生成详细推理日志 (前200条) ---
     detail_path = os.path.join(output_dir, 'role_probability_details.txt')
-    print("正在记录前100条SQL的概率分布明细...")
+    print("正在记录前200条SQL的概率分布明细...")
 
-    # 取前100条（或者更少）进行推理
-    sample_limit = min(100, len(df_l2))
+    # 取前200条（或者更少）进行推理
+    sample_limit = min(200, len(df_l2))
     sample_embs = torch.tensor(
         embedder.get_embeddings(df_l2['clean_query'].iloc[:sample_limit].values, batch_size=32)).to(device)
+    rag_sample_features = []
+    for emb in sample_embs.cpu().numpy():
+        rag_sample_features.append(get_max_similarities_faiss(emb, role_kb, num_roles))
+    rag_sample_features = np.array(rag_sample_features)
+    sample_input = torch.tensor(np.concatenate([sample_embs.cpu().numpy(), rag_sample_features], axis=1), dtype=torch.float32).to(device)
 
     with torch.no_grad():
-        probs = model(sample_embs).cpu().numpy()  # shape (100, 4)
+        probs = model(sample_input).cpu().numpy()  # shape (200, 4)
         _, preds = torch.max(torch.tensor(probs), 1)
 
-    with open(detail_path, 'w', encoding='utf-8') as f:
-        # 表头
-        headers = ["ID", "True_Role", "Pred_Role", "Result", "Confidence", "SQL_Snippet"]
-        f.write(
-            f"{headers[0]:<5} | {headers[1]:<10} | {headers[2]:<10} | {headers[3]:<8} | {headers[4]:<10} | {headers[5]}\n")
-        f.write("-" * 120 + "\n")
+    # 为前200条样本计算本层判定结果（0/2）
+    pred_layer2 = []
+    for i in range(sample_limit):
+        query = df_l2.loc[i, 'query']
+        true_role = df_l2.loc[i, 'role']
+        pred_role = preds[i].item()
+        rag_sim = rag_sample_features[i][true_role]
+        if rag_sim < rag_threshold:
+            pred_layer2.append(2)
+        elif pred_role != true_role:
+            pred_layer2.append(2)
+        else:
+            pred_layer2.append(0)
+    actual_label = df_l2['Label'].iloc[:sample_limit].values
 
-        for i in range(sample_limit):
-            query_clip = df_l2.loc[i, 'query'][:50].replace('\n', ' ') + "..."
-            actual_role = df_l2.loc[i, 'role']
-            pred_role = preds[i].item()
-
-            # Confidence 是预测角色的概率值
-            confidence = probs[i][pred_role]
-
-            # 判断逻辑：如果 真实角色 != 预测角色，这可能就是伪造的 "越权(Label 2)"
-            is_match = (actual_role == pred_role)
-            res_mark = "MATCH" if is_match else "MISMATCH"
-
-            f.write(
-                f"{i:<5} | {actual_role:<10} | {pred_role:<10} | {res_mark:<8} | {confidence:.4f}     | {query_clip}\n")
+    write_detail_log(
+        detail_path, df_l2, preds, probs, rag_sample_features, pred_layer2, actual_label, sample_limit=sample_limit
+    )
 
     print(f"Layer 2 实验完成！请查看: {output_dir}")
 
