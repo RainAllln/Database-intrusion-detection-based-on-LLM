@@ -12,11 +12,17 @@ from src import SQLPreprocessor, SQLEmbedder, Layer2Classifier
 from sklearn.metrics.pairwise import cosine_similarity
 import faiss
 from src.utils import (
-    plot_confusion_matrix, plot_loss_curve, write_classification_report, write_detail_log
+    plot_confusion_matrix, plot_loss_curve, write_detail_log,
+    plot_rag_similarity_distribution
 )
 
-def build_role_knowledge_base_faiss(X_train, y_train, labels_train, num_roles):
-    # 只存储正常SQL（Label==0），每个角色一个FAISS索引
+def l2_normalize(vecs):
+    norm = np.linalg.norm(vecs, axis=1, keepdims=True)
+    norm[norm == 0] = 1
+    return vecs / norm
+
+def build_role_knowledge_base_faiss_l2(X_train, y_train, labels_train, num_roles):
+    # 只存储正常SQL（Label==0），每个角色一个FAISS索引（L2距离）
     mask = (labels_train == 0)
     kb = {}
     X_train_np = X_train.cpu().numpy() if isinstance(X_train, torch.Tensor) else X_train
@@ -26,7 +32,6 @@ def build_role_knowledge_base_faiss(X_train, y_train, labels_train, num_roles):
         idx = (y_train_np[mask] == r)
         vecs = X_train_np[mask][idx]
         if vecs.shape[0] == 0:
-            # 空索引，填充一个全零向量
             index = faiss.IndexFlatL2(dim)
             index.add(np.zeros((1, dim), dtype='float32'))
         else:
@@ -35,16 +40,15 @@ def build_role_knowledge_base_faiss(X_train, y_train, labels_train, num_roles):
         kb[r] = index
     return kb
 
-def get_max_similarities_faiss(sql_emb, kb, num_roles):
-    # 对每个角色知识库FAISS索引，计算最大相似度（L2距离转相似度）
-    sims = []
+def get_top1_l2_distances_faiss(sql_emb, kb, num_roles):
+    # 对每个角色知识库FAISS索引，计算Top-1最近L2距离
+    dists = []
     emb = sql_emb.astype('float32').reshape(1, -1)
     for r in range(num_roles):
-        D, _ = kb[r].search(emb, 1)  # D: (1,1) 最小距离
-        # 距离转相似度（越小越相似，这里用负距离或exp(-d)都可）
-        sim = float(np.exp(-D[0][0]))
-        sims.append(sim)
-    return np.array(sims)
+        D, _ = kb[r].search(emb, 1)
+        dist = float(D[0][0])
+        dists.append(dist)
+    return np.array(dists)
 
 def main_layer2():
     # --- 1. 加载与预处理  ---
@@ -71,8 +75,6 @@ def main_layer2():
     # 假设 role 总是 0, 1, 2, 3，所以 num_roles=4
     # 可以用 len(df_l2['role'].unique())
     num_roles = 4
-
-    # 命名规范：exp2_[时间戳]
     exp_folder = f"exp2_{timestamp}"
     output_dir = os.path.join("notebooks", exp_folder)
     os.makedirs(output_dir, exist_ok=True)
@@ -113,14 +115,14 @@ def main_layer2():
     # --- 设备定义提前 ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- RAG知识库构建（FAISS） ---
-    print("正在用FAISS构建RAG角色知识库...")
-    role_kb = build_role_knowledge_base_faiss(X_train, y_train, labels_train, num_roles)
+    # --- RAG知识库构建（FAISS，L2距离） ---
+    print("正在用FAISS构建RAG角色知识库（L2距离）...")
+    role_kb = build_role_knowledge_base_faiss_l2(X_train, y_train, labels_train, num_roles)
 
-    # === 修正：训练时也拼接RAG特征 ===
+    # === 训练时也拼接RAG特征（L2距离，Top-1） ===
     rag_features_train = []
     for emb in X_train.cpu().numpy():
-        rag_features_train.append(get_max_similarities_faiss(emb, role_kb, num_roles))
+        rag_features_train.append(get_top1_l2_distances_faiss(emb, role_kb, num_roles))
     rag_features_train = np.array(rag_features_train)  # shape: (N, 4)
     X_train_rag = torch.tensor(np.concatenate([X_train.cpu().numpy(), rag_features_train], axis=1), dtype=torch.float32).to(device)
 
@@ -157,96 +159,121 @@ def main_layer2():
     # --- 6. 测验与实验结果生成 ---
     model.eval()
     with torch.no_grad():
-        # 计算RAG相似度特征（FAISS）
+        # 计算RAG特征（L2距离，Top-1）按 X_test 顺序
         rag_features = []
         for emb in X_test.cpu().numpy():
-            rag_features.append(get_max_similarities_faiss(emb, role_kb, num_roles))
-        rag_features = np.array(rag_features)  # shape: (N, 4)
-        # 拼接到BERT特征
+            rag_features.append(get_top1_l2_distances_faiss(emb, role_kb, num_roles))
+        rag_features = np.array(rag_features)
         X_test_rag = torch.tensor(np.concatenate([X_test.cpu().numpy(), rag_features], axis=1), dtype=torch.float32).to(device)
         test_outputs = model(X_test_rag)
         _, y_pred = torch.max(test_outputs, 1)
         y_pred = y_pred.cpu().numpy()
-        y_true = y_test.numpy()
+        y_true = y_test.numpy()  # 与 X_test 顺序一致
 
-    # 动态危险操作判别 + 角色预测判别
-    print("正在进行动态危险操作判别与角色预测...")
-    # 获取测试集对应的原始索引
-    test_indices = X_test.cpu().numpy().shape[0]
-    test_queries = df_l2.iloc[-test_indices:]['query'].values
-    test_roles = df_l2.iloc[-test_indices:]['role'].values
+    rag_threshold = 0.7
+
+    print("正在进行静态RAG判别与角色预测...")
+    # 使用 labels_test（与 X_test 顺序一致），不要从 df_l2 切片
     test_labels = labels_test
 
     final_pred = []
-    rag_threshold = 0.7  # 可调阈值
-    for i, (query, true_role, pred_role) in enumerate(zip(test_queries, test_roles, y_pred)):
-        rag_sim = rag_features[i][true_role]
-        # 1. RAG一致性判定
-        if rag_sim < rag_threshold:
-            final_pred.append(2)  # 判为伪装攻击
-            continue
-        # 2. 角色预测判定
-        if pred_role != true_role:
-            final_pred.append(2)
-        else:
+    for i, (true_role, pred_role) in enumerate(zip(y_true, y_pred)):
+        rag_dist = rag_features[i][pred_role]  # 用预测角色的知识库距离
+        if pred_role == true_role and rag_dist < rag_threshold:
             final_pred.append(0)
-
+        else:
+            final_pred.append(2)
     final_pred = np.array(final_pred)
-    # 只统计预测为正常的准确率
+
     mask = (final_pred == 0)
     acc = np.mean(test_labels[mask] == 0) if np.sum(mask) > 0 else 0
+    not_pass_mask = (final_pred != 0)
+    acc_label2 = np.mean(test_labels[not_pass_mask] == 2) if np.sum(not_pass_mask) > 0 else 0
 
+    # --- 打印在控制台 ---
+    print("\n=== 第二层 (MLP+RAG) 评估报告 ===")
     print(f"最终通过语句数: {np.sum(mask)} / {len(final_pred)}")
     print(f"最终准确率（通过语句与Label=0的重合度）: {acc:.4f}")
+    print(f"未通过语句数: {np.sum(not_pass_mask)} / {len(final_pred)}")
+    print(f"未通过语句与Label=2的重合度: {acc_label2:.4f}")
 
-    # 绘制混淆矩阵（颜色改成绿色，与layer1隔开）
+    # --- 保存实验参数与结果到 TXT ---
+    report_path = os.path.join(output_dir, 'experiment_report.txt')
+    # 构造实验参数和结果内容
+    title = "SQL Detection Layer 2 Experiment Report"
+    model_paras = (
+        f"Model: MLP+RAG\n"
+        f"Embedding: DistilBERT+AST\n"
+        f"RAG相似度阈值: 静态阈值 0.7\n"
+        f"训练集样本数: {len(X_train)}\n"
+        f"测试集样本数: {len(X_test)}\n"
+        f"角色数: {num_roles}\n"
+    )
+    note = (
+        f"最终通过语句数: {np.sum(mask)} / {len(final_pred)}\n"
+        f"最终准确率（通过语句与Label=0的重合度）: {acc:.4f}\n"
+        f"未通过语句数: {np.sum(not_pass_mask)} / {len(final_pred)}\n"
+        f"未通过语句与Label=2的重合度: {acc_label2:.4f}\n"
+    )
+    content = (
+        "\n--- 分类报告 ---\n"
+        f"{classification_report(y_true, y_pred, target_names=[f'R{i}' for i in range(num_roles)])}\n"
+    )
+    from src.utils import write_experiment_report
+    write_experiment_report(report_path, title, model_paras, note, content)
+
+    # 1. 绘制MLP角色分类混淆矩阵
     plot_confusion_matrix(
         y_true, y_pred, output_dir,
         labels=[f'R{i}' for i in range(num_roles)],
-        filename='confusion_matrix.png',
+        filename='confusion_matrix_role.png',
         cmap='Greens',
-        title='Layer 2: Role Accountability Matrix'
+        title='Layer 2: Role Classification Matrix'
     )
 
-    # 保存分类报告 TXT
-    write_classification_report(
-        y_true, y_pred, output_dir,
-        labels=[f'R{i}' for i in range(num_roles)],
-        filename='layer2_report.txt',
-        note="This model predicts which role 'usually' writes such SQL.\nIf True Role != Predicted Role, it might be a violation."
+    # 2. 绘制最终判定（正常/伪装攻击）混淆矩阵
+    plot_confusion_matrix(
+        test_labels, final_pred, output_dir,
+        labels=[0, 2],
+        filename='confusion_matrix_final.png',
+        cmap='Blues',
+        title='Layer 2: Final Decision Matrix (0=Normal, 2=Impersonation)'
     )
 
     # --- 7. 生成详细推理日志 (前200条) ---
     detail_path = os.path.join(output_dir, 'role_probability_details.txt')
     print("正在记录前200条SQL的概率分布明细...")
 
-    # 取前200条（或者更少）进行推理
     sample_limit = min(200, len(df_l2))
+    # 日志改为与训练/评估一致：使用 ast_query 生成嵌入
     sample_embs = torch.tensor(
-        embedder.get_embeddings(df_l2['clean_query'].iloc[:sample_limit].values, batch_size=32)).to(device)
+        embedder.get_embeddings(df_l2['ast_query'].iloc[:sample_limit].values, batch_size=32)
+    ).to(device)
+
     rag_sample_features = []
     for emb in sample_embs.cpu().numpy():
-        rag_sample_features.append(get_max_similarities_faiss(emb, role_kb, num_roles))
+        rag_sample_features.append(get_top1_l2_distances_faiss(emb, role_kb, num_roles))
     rag_sample_features = np.array(rag_sample_features)
-    sample_input = torch.tensor(np.concatenate([sample_embs.cpu().numpy(), rag_sample_features], axis=1), dtype=torch.float32).to(device)
+
+    sample_input = torch.tensor(
+        np.concatenate([sample_embs.cpu().numpy(), rag_sample_features], axis=1),
+        dtype=torch.float32
+    ).to(device)
 
     with torch.no_grad():
-        probs = model(sample_input).cpu().numpy()  # shape (200, 4)
+        probs = model(sample_input).cpu().numpy()
         _, preds = torch.max(torch.tensor(probs), 1)
 
-    # 为前200条样本计算本层判定结果（0/2）
     pred_layer2 = []
     for i in range(sample_limit):
-        query = df_l2.loc[i, 'query']
         true_role = df_l2.loc[i, 'role']
         pred_role = preds[i].item()
-        rag_sim = rag_sample_features[i][true_role]
-        if rag_sim < rag_threshold:
-            pred_layer2.append(2)
-        elif pred_role != true_role:
-            pred_layer2.append(2)
-        else:
+        # 使用预测角色的RAG距离进行最终判定
+        rag_dist = rag_sample_features[i][pred_role]
+        if pred_role == true_role and rag_dist < rag_threshold:
             pred_layer2.append(0)
+        else:
+            pred_layer2.append(2)
     actual_label = df_l2['Label'].iloc[:sample_limit].values
 
     write_detail_log(
@@ -258,3 +285,4 @@ def main_layer2():
 
 if __name__ == "__main__":
     main_layer2()
+

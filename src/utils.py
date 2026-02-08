@@ -2,6 +2,7 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
+from datetime import datetime
 from sklearn.metrics import confusion_matrix, roc_curve, roc_auc_score, classification_report
 
 def plot_confusion_matrix(y_true, y_pred, output_dir, labels=None, filename='confusion_matrix.png', cmap='Blues', title='Confusion Matrix'):
@@ -55,25 +56,35 @@ def plot_loss_curve(loss_history, output_dir, filename='training_loss.png', titl
     plt.close()
     print(f"图表已保存: {save_path}")
 
-def write_experiment_report(report_path, content):
+def plot_rag_similarity_distribution(rag_sim_distributions, output_dir, filename='rag_sim_distribution.png'):
+    """
+    rag_sim_distributions: dict, key=role, value=list of similarity scores
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    plt.figure(figsize=(10, 6))
+    for r, sims in rag_sim_distributions.items():
+        sns.histplot(sims, bins=30, kde=True, label=f'Role {r}', stat='density', alpha=0.5)
+    plt.xlabel('Max Similarity to Role Knowledge Base')
+    plt.ylabel('Density')
+    plt.title('RAG Similarity Distribution for Each Role (Train, Label=0)')
+    plt.legend()
+    save_path = os.path.join(output_dir, filename)
+    plt.savefig(save_path)
+    plt.close()
+    print(f"RAG相似度分布图已保存: {save_path}")
+
+def write_experiment_report(report_path, title, model_paras, note, content):
     with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(f"=== {title} ===\n")
+        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("\n--- Model Parameters ---\n")
+        f.write(model_paras + "\n")
+        f.write("\n--- Experiment Details ---\n")
+        f.write(note + "\n")
+        f.write("\n--- Experiment Results ---\n")
         f.write(content)
     print(f"实验参数与结果已写入: {report_path}")
-
-def write_classification_report(y_true, y_pred, output_dir, labels, filename='layer2_report.txt', note=None):
-    report = classification_report(y_true, y_pred, target_names=labels)
-    acc = (y_true == y_pred).mean()
-    report_path = os.path.join(output_dir, filename)
-    with open(report_path, 'w', encoding='utf-8') as f:
-        f.write("=== SQL Detection Layer 2 (Role Perception) Report ===\n")
-        from datetime import datetime
-        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Test Set Accuracy: {acc:.4f}\n")
-        if note:
-            f.write(f"Note: {note}\n")
-        f.write("\n--- Classification Report ---\n")
-        f.write(report)
-    print(f"分类报告已写入: {report_path}")
 
 def write_detail_log(detail_path, df, preds, probs, rag_sims, pred_layer2, actual_label, sample_limit=200):
     with open(detail_path, 'w', encoding='utf-8') as f:

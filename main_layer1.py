@@ -103,14 +103,20 @@ def main():
     
     # --- 保存实验参数与结果到 TXT ---
     report_path = os.path.join(output_dir, 'experiment_report.txt')
-    report_content = (
-        "=== SQL Detection Layer 1 Experiment Report ===\n"
-        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        "--- Data Info ---\n"
+    report_title = "SQL Detection Layer 1 Experiment Report"
+    report_note = (
         f"Total Samples: {len(X_train) + len(X_test)}\n"
         "Training Strategy: Semi-Supervised (Normal Samples Only)\n"
         f"Training Samples Used: {len(X_train)}\n"
         f"Test Samples: {len(X_test)}\n\n"
+    )
+    report_params = (
+        f"preprocessor: AST\n"
+        f"Model: Isolation Forest\n"
+        f"Contamination Rate: {contamination_rate:.4f}\n"
+        "Feature Type: AST Flattened Sequences\n"
+    )
+    report_content = (
         "--- Evaluation Metrics ---\n"
         f"Accuracy: {acc:.4f}\n"
         f"F1 Score: {f1:.4f}\n"
@@ -118,7 +124,7 @@ def main():
         "--- Classification Report ---\n"
         f"{cls_report}"
     )
-    write_experiment_report(report_path, report_content)
+    write_experiment_report(report_path,report_title,report_params,report_note, report_content)
 
     # 模拟单个新查询测试
     new_query = "SELECT * FROM users WHERE id = 1 OR 1=1 --"
