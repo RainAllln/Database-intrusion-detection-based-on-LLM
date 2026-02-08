@@ -279,15 +279,15 @@ weighted avg       0.89      0.87      0.87     18524
 准确率从之前的0.63提升到了0.87，说明RAG技术的引入确实提升了模型的准确率。
 
 ## 3. 后续工作计划
-数据集优化：尝试优化自己生成的数据集，加入更多细节和样本量，使其更加真实
+把实验环境转移到云服务器上，准备进行大规模数据集的训练和测试，并且尝试使用更大的模型。
 
-数据处理优化：1.尝试使用AST对SQL语句展平，提取更多结构化特征 2.尝试使用其他的预训练模型进行特征提取。
+数据集优化：尝试优化自己生成的数据集，加入更多细节和样本量，使其更加真实。加入sqliv2和sqliv3扩大数据集规模，对比实验效果。
+
+数据处理优化：1.尝试自己训练一个SQL专用的DistilBERT模型，提升特征提取效果。 2.尝试用其他的特征提取办法对比实验。
 
 第一层模型的优化：1.尝试调整孤立森林的参数，提高准确率。 2.查找其他的集成异常检测器进行对比实验。
 
-第二层模型的优化: 1.加入RAG技术，增强大语言模型对上下文的理解能力。 2.尝试用其他的大语言模型进行对比实验。
-
-将第一层模型和第二层模型进行联合训练，提升整体的检测效果
+第二层模型的优化: 1.优化当前使用的FAISS向量库的参数，目前设定静态阈值0.7并且使用L2距离和TOP-1比较，可以采取更加灵活的方案。 2.尝试用其他的分类模型对比实验。
 
 ## 参考文献
 
@@ -301,3 +301,11 @@ https://mc.spacejournal.cn/article/doi/10.19304/J.ISSN1000-7180.2023.0721
 https://arxiv.org/abs/2508.11711
 
 [4] 胡修闻.基于AST-LSTM和对抗训练的混淆SQL注入攻击检测研究[D].东南大学,2024.DOI:10.27014/d.cnki.gdnau.2024.004766.（这篇文章用LSTM做了个类似上下文增强的，第二层模型可以试试，不用RAG）（知网搜）
+
+[5] Sun, Weisong, Chunrong Fang, Yun Miao, Yudu You, Mengzhe Yuan, Yuchen Chen, Quanjun Zhang, An Guo, Xiang Chen, Yang Liu and Zhenyu Chen. “Abstract Syntax Tree for Programming Language Understanding and Representation: How Far Are We?” ArXiv abs/2312.00413 (2023): n. pag.（AST对于特征提取的优势）(https://doi.org/10.48550/arXiv.2312.00413)
+
+[6] Muhammad Arslan, Hussam Ghanem, Saba Munawar, Christophe Cruz, A Survey on RAG with LLMs, Procedia Computer Science, Volume 246, 2024, Pages 3781-3790, ISSN 1877-0509,(https://doi.org/10.1016/j.procs.2024.09.178).
+
+[7] Xian, Jiarong, Jibao Yuan, Peiwei Zheng and Dexian Chen. “BERT-Enhanced Retrieval Tool for Homework Plagiarism Detection System.” ArXiv abs/2404.01582 (2024): n. pag.(用BERT和FAISS完成了一个作业抄袭检查系统)(https://doi.org/10.48550/arXiv.2404.01582)
+
+[8] Douze, Matthijs, Alexandr Guzhva, Chengqi Deng, Jeff Johnson, Gergely Szilvasy, Pierre-Emmanuel Mazar'e, Maria Lomeli, Lucas Hosseini and Herv'e J'egou. “The Faiss library.” ArXiv abs/2401.08281 (2024): n. pag.(FAISS库的介绍)(https://doi.org/10.48550/arXiv.2401.08281)
