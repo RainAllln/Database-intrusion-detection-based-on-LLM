@@ -15,40 +15,10 @@ from src.utils import (
     plot_confusion_matrix, plot_loss_curve, write_detail_log,
     plot_rag_similarity_distribution
 )
-
-def l2_normalize(vecs):
-    norm = np.linalg.norm(vecs, axis=1, keepdims=True)
-    norm[norm == 0] = 1
-    return vecs / norm
-
-def build_role_knowledge_base_faiss_l2(X_train, y_train, labels_train, num_roles):
-    # 只存储正常SQL（Label==0），每个角色一个FAISS索引（L2距离）
-    mask = (labels_train == 0)
-    kb = {}
-    X_train_np = X_train.cpu().numpy() if isinstance(X_train, torch.Tensor) else X_train
-    y_train_np = y_train.cpu().numpy() if isinstance(y_train, torch.Tensor) else y_train
-    dim = X_train_np.shape[1]
-    for r in range(num_roles):
-        idx = (y_train_np[mask] == r)
-        vecs = X_train_np[mask][idx]
-        if vecs.shape[0] == 0:
-            index = faiss.IndexFlatL2(dim)
-            index.add(np.zeros((1, dim), dtype='float32'))
-        else:
-            index = faiss.IndexFlatL2(dim)
-            index.add(vecs.astype('float32'))
-        kb[r] = index
-    return kb
-
-def get_top1_l2_distances_faiss(sql_emb, kb, num_roles):
-    # 对每个角色知识库FAISS索引，计算Top-1最近L2距离
-    dists = []
-    emb = sql_emb.astype('float32').reshape(1, -1)
-    for r in range(num_roles):
-        D, _ = kb[r].search(emb, 1)
-        dist = float(D[0][0])
-        dists.append(dist)
-    return np.array(dists)
+from src.rag import (
+    build_role_knowledge_base_faiss_l2,
+    get_top1_l2_distances_faiss,
+)
 
 def main_layer2():
     # --- 1. 加载与预处理  ---
@@ -87,8 +57,8 @@ def main_layer2():
     print("正在提取语义特征 (DistilBERT)。")
     # 简单清洗
     df_l2['clean_query'] = df_l2['query'].astype(str).apply(preprocessor.normalize)
-    # 新增：AST展平SQL
-    df_l2['ast_query'] = df_l2['query'].astype(str).apply(lambda x: " ".join(preprocessor.get_ast_sequence(x)))
+    # 预处理
+    df_l2['ast_query'] = df_l2['query'].astype(str).apply(preprocessor.normalize_and_flatten)
 
     # 提取 Embedding
     # 可选：用AST特征或normalize特征
@@ -173,7 +143,7 @@ def main_layer2():
     rag_threshold = 0.7
 
     print("正在进行静态RAG判别与角色预测...")
-    # 使用 labels_test（与 X_test 顺序一致），不要从 df_l2 切片
+    # 使用 labels_test（与 X_test 顺序一致）
     test_labels = labels_test
 
     final_pred = []

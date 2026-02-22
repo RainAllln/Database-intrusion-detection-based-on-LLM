@@ -17,3 +17,17 @@ class Layer1Detector:
     def detect(self, embeddings):
         return self.model.detect(embeddings)
 
+    def get_hyperparams(self):
+        """返回底层模型的超参数（如果支持）."""
+        if hasattr(self.model, "get_hyperparams"):
+            return self.model.get_hyperparams()
+        return {}
+
+    def get_hyperparams_str(self) -> str:
+        """
+        返回底层模型生成的超参数字符串，如果不存在则返回空字符串。
+        以后更换第一层模型，只要底层实现 get_hyperparams_str 即可。
+        """
+        if hasattr(self.model, "get_hyperparams_str"):
+            return self.model.get_hyperparams_str()
+        return "Layer1: (no hyperparams_str defined)"

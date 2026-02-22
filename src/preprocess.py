@@ -38,3 +38,15 @@ class SQLPreprocessor:
         for stmt in parsed:
             tokens.extend(flatten(stmt.tokens))
         return tokens
+
+    def normalize_and_flatten(self, sql):
+        """
+        先对 SQL 做 normalize（替换具体值为占位符），
+        再对规范化后的 SQL 做 AST 展平并返回以空格分隔的字符串。
+        便于 downstream 直接作为 embedder 的输入。
+        """
+        if not isinstance(sql, str):
+            return ""
+        norm = self.normalize(sql)
+        tokens = self.get_ast_sequence(norm)
+        return " ".join(tokens)

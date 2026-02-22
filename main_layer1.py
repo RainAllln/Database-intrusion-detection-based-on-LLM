@@ -25,8 +25,8 @@ def main():
     preprocessor = SQLPreprocessor()
     # 修改列名为 'query' 以匹配 csv 文件头
     df['clean_query'] = df['query'].apply(preprocessor.normalize)
-    # 新增：AST展平SQL
-    df['ast_query'] = df['query'].apply(lambda x: " ".join(preprocessor.get_ast_sequence(x)))
+    # 预处理
+    df['ast_query'] = df['query'].apply(preprocessor.normalize_and_flatten)
 
     # 确保 Label 是数值型 (2：伪装攻击， 1：注入攻击，0：正常)
     df['Label'] = pd.to_numeric(df['Label'], errors='coerce').fillna(0).astype(int)
