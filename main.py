@@ -6,8 +6,14 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 from src import SQLPreprocessor, SQLEmbedder, Layer1Detector, Layer2Classifier
-# --- 删除本地 faiss 与 RAG 实现，改用 src.rag ---
 from src.rag import build_role_knowledge_base_faiss_l2, get_top1_l2_distances_faiss
+from src.utils import (
+    plot_confusion_matrix,
+    plot_score_distribution,
+    plot_roc_curve,
+    plot_rag_similarity_distribution,
+    plot_loss_curve
+)
 
 def main():
     # 1. 数据加载与预处理
@@ -26,7 +32,7 @@ def main():
     df['ast_query'] = df['query'].apply(preprocessor.normalize_and_flatten)
     df['Label'] = pd.to_numeric(df['Label'], errors='coerce').fillna(0).astype(int)
 
-    # 2. 特征提取（DistilBERT, 使用AST）
+    # 2. 特征提取（DistilBERT）
     embedder = SQLEmbedder()
     batch_size = 128 if torch.cuda.is_available() else 32
     embeddings = embedder.get_embeddings(df['ast_query'].values, batch_size=batch_size)
@@ -52,11 +58,11 @@ def main():
     train_embeddings = embeddings[train_idx]
     test_embeddings = embeddings[test_idx]
 
-    # 4. 第一层训练（孤立森林，仅正常样本）
+    # 4. 第一层训练（LOF，仅正常样本）
     y_train_layer1 = train_df['Label'].apply(lambda x: 1 if x == 1 else 0).values
     X_train_normal = train_embeddings[y_train_layer1 == 0]
-    # 不再在这里传入手工超参数，由模型采用内部默认配置
-    l1_detector = Layer1Detector(model_name="isolation_forest")
+    # 使用 LOF 模型
+    l1_detector = Layer1Detector(model_name="lof")
     l1_detector.train(X_train_normal)
 
     # 5. 第二层训练（MLP+RAG角色分类）
@@ -207,26 +213,13 @@ def main():
     print("\n=== 详细分类报告（框架输出标签与真实标签） ===")
     print(classification_report(true_label, framework_pred, target_names=['正常', '注入', '伪装'], zero_division=0))
 
-    # 混淆矩阵
-    from sklearn.metrics import confusion_matrix
-    cm = confusion_matrix(true_label, framework_pred)
-    print("\nConfusion Matrix:")
-    print(cm)
-
     # 构造并写入实验报告（确保所有变量已初始化，避免 UnboundLocalError）
     timestamp_report = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir_report = os.path.join("notebooks", f"exp_main_{timestamp_report}")
     os.makedirs(output_dir_report, exist_ok=True)
     report_path = os.path.join(output_dir_report, 'experiment_report.txt')
 
-    # --- 新增：生成并保存诊断图表（直接保存到 output_dir_report）---
-    from src.utils import (
-        plot_confusion_matrix,
-        plot_score_distribution,
-        plot_roc_curve,
-        plot_rag_similarity_distribution,
-        plot_loss_curve
-    )
+
 
     # 1) 混淆矩阵（整体框架）
     plot_confusion_matrix(true_label, framework_pred, output_dir_report, labels=['0', '1', '2'],
@@ -308,3 +301,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

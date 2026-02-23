@@ -8,6 +8,12 @@ class Layer1Detector:
         if model_name == "isolation_forest":
             from models.isolation_forest import IsolationForestModel
             self.model = IsolationForestModel()
+        elif model_name == "one_class_svm":
+            from models.one_class_svm import OneClassSVMModel
+            self.model = OneClassSVMModel()
+        elif model_name == "lof":
+            from models.lof import LOFModel
+            self.model = LOFModel()
         else:
             raise ValueError(f"未知模型: {model_name}")
 
@@ -31,3 +37,4 @@ class Layer1Detector:
         if hasattr(self.model, "get_hyperparams_str"):
             return self.model.get_hyperparams_str()
         return "Layer1: (no hyperparams_str defined)"
+

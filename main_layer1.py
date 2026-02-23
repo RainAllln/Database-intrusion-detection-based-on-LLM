@@ -8,7 +8,7 @@ import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score, classification_report, roc_auc_score, confusion_matrix, roc_curve
 from src import SQLPreprocessor, SQLEmbedder, Layer1Detector
-from src.utils import plot_confusion_matrix, plot_roc_curve, plot_score_distribution, write_experiment_report
+from src.utils import plot_confusion_matrix, plot_roc_curve, plot_score_distribution, write_experiment_report, to_camel_case
 
 
 def main():
@@ -39,7 +39,6 @@ def main():
     # 3. 特征提取
     embedder = SQLEmbedder()
     run_batch_size = 128 if torch.cuda.is_available() else 32
-    # 可选：用AST特征或normalize特征
     # embeddings = embedder.get_embeddings(df['clean_query'].values, batch_size=run_batch_size)
     embeddings = embedder.get_embeddings(df['ast_query'].values, batch_size=run_batch_size)
 
@@ -47,28 +46,25 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(embeddings, y_for_layer1, test_size=0.2, random_state=42)
 
     # 第一层训练策略：仅使用 Label 为 0 和 2 的样本进行训练（因为它们语法正常）
-    # 这样孤立森林会把 Label 1 这种结构怪异的语句识别为离群点
+    # 这样第一层会把 Label 1 这种结构怪异的语句识别为离群点
     X_train_normal = X_train[y_train == 0]
 
     contamination_rate = 0.05  # 假设预期误报率为 5%
 
-    l1_detector = Layer1Detector(model_name="isolation_forest")
-
-    l1_detector.train(X_train_normal)
-
     # --- 创建实验文件夹 ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # 文件夹命名：exp1_cont[污染率]_[时间戳]，表示第一层模型的实验
-    exp_folder = f"exp1_cont{contamination_rate:.4f}_{timestamp}"
+    model = "lof"  # 修改为 LOF 模型
+    camel_case_model = to_camel_case(model)  # 转换为驼峰命名法
+    exp_folder = f"exp1_{camel_case_model}_{timestamp}"
     output_dir = os.path.join("notebooks", exp_folder)
     os.makedirs(output_dir, exist_ok=True)
     print(f"本次实验结果将保存至: {output_dir}")
-    # -------------------
-    
-    print(f"初始化孤立森林，仅使用正常样本训练，污染率参数(预期误报): {contamination_rate:.4f}")
-    print(f"训练样本数 (Normal Only): {len(X_train_normal)}")
-    l1_detector = Layer1Detector(model_name="isolation_forest")
+
+    # 初始化 LOF 模型
+    l1_detector = Layer1Detector(model_name=model)
     l1_detector.train(X_train_normal)
+    print(f"初始化 LOF，仅使用正常样本训练，参数: n_neighbors=20, contamination=0.05")
+    print(f"训练样本数 (Normal Only): {len(X_train_normal)}")
 
     # 5. 在测试集上评估
     print("正在评估第一层模型...")
@@ -94,7 +90,7 @@ def main():
     cls_report = classification_report(y_test, y_pred_mapped, target_names=['Normal', 'Attack'])
 
     # --- 打印在控制台 ---
-    print("\n=== 第一层 (Isolation Forest) 评估报告 ===")
+    print("\n=== 第一层 (LOF) 评估报告 ===")
     print(f"准确率 (Accuracy): {acc:.4f}")
     print(f"F1 分数 (F1 Score): {f1:.4f}")
     print(f"ROC-AUC Score: {roc_score if isinstance(roc_score, str) else f'{roc_score:.4f}'}")
@@ -112,8 +108,8 @@ def main():
     )
     report_params = (
         f"preprocessor: AST\n"
-        f"Model: Isolation Forest\n"
-        f"Contamination Rate: {contamination_rate:.4f}\n"
+        f"Model: LOF\n"
+        f"Hyperparameters:\n{l1_detector.get_hyperparams_str()}\n"
         "Feature Type: AST Flattened Sequences\n"
     )
     report_content = (
@@ -124,7 +120,7 @@ def main():
         "--- Classification Report ---\n"
         f"{cls_report}"
     )
-    write_experiment_report(report_path,report_title,report_params,report_note, report_content)
+    write_experiment_report(report_path, report_title, report_params, report_note, report_content)
 
     # 模拟单个新查询测试
     new_query = "SELECT * FROM users WHERE id = 1 OR 1=1 --"
