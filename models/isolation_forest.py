@@ -3,8 +3,8 @@ from sklearn.ensemble import IsolationForest
 class IsolationForestModel:
     def __init__(self):
         self.model = IsolationForest(
-            n_estimators=200,
-            contamination=0.05,
+            n_estimators=300,  # 增加树的数量以提高复杂数据的拟合能力
+            contamination=0.15, # 稍微提高污染率预期，收紧正常边界，让更多异常被识别出来
             max_samples='auto',
             random_state=42,
             n_jobs=-1
