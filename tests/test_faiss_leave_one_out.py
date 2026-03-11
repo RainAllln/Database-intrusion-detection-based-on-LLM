@@ -89,31 +89,33 @@ def plot_cross_role_distribution(cross_sim, output_dir):
         print(f"角色{i}在其它角色知识库的相似度分布图已保存: {save_path}")
 
 def main():
-    # 数据集路径修正
-    data_path = os.path.join(project_root, 'data', 'custom', 'custom_dataset.csv')
-    output_dir = os.path.join(project_root, 'tests', 'faiss_leave_one_out_results')
+    # 数据集路径修正，指向 v2 版本的高复杂度数据集
+    data_path = os.path.join(project_root, 'data', 'custom', 'complex_dataset_v2.csv')
+    output_dir = os.path.join(project_root, 'tests', 'faiss_complex_leave_one_out_results')
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"读取数据: {data_path}")
     df = pd.read_csv(data_path, encoding='utf-8')
-    num_roles = 4
+    num_roles = 8  # 修改为 8 个角色
 
-    # 只取正常SQL
+    # 只取正常SQL (Label 0)，直接使用大写 Label
     mask = (df['Label'] == 0)
-    df = df[mask].reset_index(drop=True)
-    y = df['role'].values
-    labels = df['Label'].values
+    
+    df_normal = df[mask].reset_index(drop=True)
+    y = df_normal['role'].values
 
     # 提取DistilBERT特征向量
-    print("正在提取DistilBERT特征向量...")
+    print(f"正在为 {len(df_normal)} 条正常 SQL 提取特征向量...")
     embedder = SQLEmbedder()
-    # 可选：用AST展平或normalize
+    # 使用 normalize_and_flatten 预处理
     preprocessor = SQLPreprocessor()
-    df['ast_query'] = df['query'].astype(str).apply(lambda x: " ".join(preprocessor.get_ast_sequence(x)))
-    texts = df['ast_query'].tolist()
+    df_normal['processed_query'] = df_normal['query'].astype(str).apply(lambda x: preprocessor.normalize_and_flatten(x))
+    texts = df_normal['processed_query'].tolist()
     X = embedder.get_embeddings(texts, batch_size=64)
 
-    kb = build_role_kb_leave_one_out(X, y, labels, num_roles)
+    # labels 这里传入全 0 的数组，因为 df_normal 已经过滤过了
+    labels_all_zero = np.zeros(len(y))
+    kb = build_role_kb_leave_one_out(X, y, labels_all_zero, num_roles)
     sim_dict = {}
     for r in range(num_roles):
         vecs = kb[r]
@@ -131,3 +133,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
