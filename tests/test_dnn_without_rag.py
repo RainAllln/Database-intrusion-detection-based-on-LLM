@@ -6,18 +6,41 @@ import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
+import torch.nn as nn
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_root)
 
-# 使用实际存在的模块和类
 from src.preprocess import SQLPreprocessor
 from src.feature import SQLEmbedder
-from src.detector_layer2 import Layer2Classifier
 
 
-def test_mlp_without_rag():
-    # 1. 加载数据（和 layer2 一致：使用你生成的 complex_dataset_v2.csv）
+# 深度神经网络（DNN）模型，输入为 DistilBERT 提取的句向量
+class DeepNN(nn.Module):
+    def __init__(self, input_dim, num_classes):
+        super(DeepNN, self).__init__()
+        self.fc1 = nn.Linear(input_dim, 1024)
+        self.fc2 = nn.Linear(1024, 512)
+        self.fc3 = nn.Linear(512, 256)
+        self.fc4 = nn.Linear(256, 128)
+        self.fc5 = nn.Linear(128, num_classes)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.3)
+
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.relu(self.fc2(x))
+        x = self.dropout(x)
+        x = self.relu(self.fc3(x))
+        x = self.dropout(x)
+        x = self.relu(self.fc4(x))
+        x = self.fc5(x)
+        return x
+
+
+def train_and_evaluate_without_rag():
+    # 1. 加载数据（与 test_mlp_without_rag 保持一致）
     data_path = os.path.join(project_root, 'data', 'custom', 'complex_dataset_v2.csv')
     print(f"正在读取数据集: {data_path}")
     try:
@@ -28,22 +51,21 @@ def test_mlp_without_rag():
         except Exception:
             df = pd.read_csv(data_path, encoding='latin-1')
 
-    # 基本清洗
     df = df.dropna(subset=['query', 'role', 'Label']).reset_index(drop=True)
     print(f"有效样本数: {len(df)}")
 
     num_roles = 8
 
-    # 2. 特征提取：DistilBERT + clean_query，不做微调，不用 RAG
+    # 2. 特征提取：DistilBERT + clean_query，不微调，不用 RAG
     preprocessor = SQLPreprocessor()
-    embedder = SQLEmbedder(extractor_type="distilbert")  # 使用 models/distilbert.py 默认权重
+    embedder = SQLEmbedder(extractor_type="distilbert")
 
-    print("正在提取 DistilBERT 语义特征 (基于 clean_query)，用于纯 MLP 8 角色分类测试...")
+    print("正在提取 DistilBERT 语义特征 (基于 clean_query)，用于 DNN 8 角色分类测试...")
     df['clean_query'] = df['query'].astype(str).apply(preprocessor.normalize)
 
     X_embeddings = embedder.get_embeddings(df['clean_query'].values, batch_size=128)
     if X_embeddings is None:
-        raise RuntimeError("get_embeddings 返回 None，请检查 models/distilbert.py 中 DistilBERTFeatureExtractor.get_embeddings 实现。")
+        raise RuntimeError("get_embeddings 返回 None，请检查 DistilBERTFeatureExtractor.get_embeddings。")
 
     y_roles = df['role'].values.astype(int)
 
@@ -62,32 +84,11 @@ def test_mlp_without_rag():
     y_train_tensor = torch.tensor(y_train, dtype=torch.long).to(device)
     y_test_tensor = torch.tensor(y_test, dtype=torch.long).to(device)
 
-    # 4. 只用 embedding 训练 MLP（不拼 RAG，不微调 DistilBERT）
-    # 通过 Layer2Classifier 创建底层 MLP
-    model = Layer2Classifier(model_name="mlp", num_roles=num_roles, device=device)
+    # 4. 初始化 DNN 模型（输入维度 = DistilBERT 向量维度）
+    input_dim = X_train.shape[1]
+    model = DeepNN(input_dim=input_dim, num_classes=num_roles).to(device)
 
-    # 获取底层 MLP 的输入维度，用于对输入做填充/截断
-    def get_model_input_dim(wrapper):
-        for module in wrapper.model.modules():
-            if isinstance(module, torch.nn.Linear):
-                return module.in_features
-        return None
-
-    def ensure_input_dim(x, wrapper):
-        needed = get_model_input_dim(wrapper)
-        if needed is None:
-            return x
-        b, feat = x.shape[0], x.shape[1]
-        if feat == needed:
-            return x
-        if feat < needed:
-            diff = needed - feat
-            pad = torch.zeros((b, diff), dtype=x.dtype, device=x.device)
-            return torch.cat([x, pad], dim=1)
-        # 截断多余维度
-        return x[:, :needed].contiguous()
-
-    optimizer = torch.optim.Adam(model.model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = torch.nn.CrossEntropyLoss()
 
     train_loader = DataLoader(
@@ -96,16 +97,15 @@ def test_mlp_without_rag():
         shuffle=True,
     )
 
-    print(f"开始训练纯 MLP 8 角色分类模型（无 RAG 特征，无 DistilBERT 微调），Epochs: 15, Device: {device}")
-    model.model.train()
+    print(f"开始训练 DNN 8 角色分类模型（无 RAG 特征，无 DistilBERT 微调），Epochs: 15, Device: {device}")
     for epoch in range(15):
+        model.train()
         epoch_loss = 0.0
         for batch_x, batch_y in train_loader:
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-            batch_x = ensure_input_dim(batch_x, model)
 
             optimizer.zero_grad()
-            outputs = model.model(batch_x)
+            outputs = model(batch_x)
             loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
@@ -116,21 +116,27 @@ def test_mlp_without_rag():
             print(f"Epoch [{epoch + 1}/15], Loss: {avg_loss:.4f}")
 
     # 5. 测试：只看 8 角色预测准确率
-    model.model.eval()
+    model.eval()
     with torch.no_grad():
-        X_test_adj = ensure_input_dim(X_test_tensor, model)
-        outputs = model.model(X_test_adj)
+        outputs = model(X_test_tensor)
         _, y_pred = torch.max(outputs, dim=1)
-        y_pred = y_pred.cpu().numpy()
-        y_true = y_test_tensor.cpu().numpy()
 
-    acc = accuracy_score(y_true, y_pred)
-    print("\n=== 纯 MLP（无 RAG 特征、无 DistilBERT 微调）8 角色分类评估报告 ===")
+    y_pred_np = y_pred.cpu().numpy()
+    y_true_np = y_test_tensor.cpu().numpy()
+
+    acc = accuracy_score(y_true_np, y_pred_np)
+    print("\n=== DNN（无 RAG 特征、无 DistilBERT 微调）8 角色分类评估报告 ===")
     print(f"角色预测准确率: {acc:.4f}")
-    print(classification_report(y_true, y_pred, target_names=[f'R{i}' for i in range(num_roles)]))
+    print(classification_report(y_true_np, y_pred_np, target_names=[f'R{i}' for i in range(num_roles)]))
 
-    return acc, (y_true, y_pred)
+    return acc
+
+
+def main():
+    print("开始训练和评估 DNN 模型（对照 MLP，无 RAG，无微调）...")
+    acc = train_and_evaluate_without_rag()
+    print(f"最终准确率: {acc:.4f}")
 
 
 if __name__ == "__main__":
-    test_mlp_without_rag()
+    main()
