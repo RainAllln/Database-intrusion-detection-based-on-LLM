@@ -53,3 +53,37 @@ def get_top1_l2_distances_faiss(sql_emb, kb, num_roles):
         dists.append(dist)
     return np.array(dists)
 
+
+def get_enhanced_rag_features(sql_emb, kb, num_roles, k=5):
+    """
+    2.1 用“前 k 个邻居”的统计特征 + 2.2 归一化相似度分布
+    返回 (num_roles * 3 + num_roles) 维度的特征向量
+    """
+    emb = sql_emb.astype("float32").reshape(1, -1)
+    stats_features = []
+    min_distances = []
+
+    for r in range(num_roles):
+        # 搜索前 k 个最近邻
+        D, _ = kb[r].search(emb, k)
+        dists = D[0]
+        
+        # 统计特征：最小值, 均值, 方差
+        d_min = float(dists[0])
+        d_mean = float(np.mean(dists))
+        d_var = float(np.std(dists)) # 使用标准差
+        
+        stats_features.extend([d_min, d_mean, d_var])
+        min_distances.append(d_min)
+
+    # 2.2 转换为归一化后的相似度分布 (Softmax style)
+    min_distances = np.array(min_distances)
+    
+    # 调低温度参数 T=0.05使预测分布更显著（配合微调后的 Embedding）
+    T = 0.05 
+    norm_dist = (min_distances - np.min(min_distances)) / (np.mean(min_distances) + 1e-6)
+    exp_dist = np.exp(-norm_dist / T)
+    prob_dist = exp_dist / (np.sum(exp_dist) + 1e-10)
+
+    return np.concatenate([stats_features, prob_dist])
+

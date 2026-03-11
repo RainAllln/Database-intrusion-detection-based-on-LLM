@@ -5,7 +5,8 @@ import torch
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
-from src import SQLPreprocessor, SQLEmbedder, Layer1Detector, Layer2Classifier
+from sklearn.preprocessing import LabelEncoder
+from src import SQLPreprocessor, Layer1Detector, Layer2Classifier, SQLEmbedder
 from src.rag import build_role_knowledge_base_faiss_l2, get_top1_l2_distances_faiss
 from src.utils import (
     plot_confusion_matrix,
@@ -17,7 +18,7 @@ from src.utils import (
 
 def main():
     # 1. 数据加载与预处理
-    data_path = 'data/custom/custom_dataset.csv'
+    data_path = 'data/custom/complex_dataset_v3.csv'
     try:
         df = pd.read_csv(data_path, encoding='utf-8')
     except Exception:
@@ -28,57 +29,68 @@ def main():
 
     preprocessor = SQLPreprocessor()
     df['clean_query'] = df['query'].apply(preprocessor.normalize)
-    # 预处理
     df['ast_query'] = df['query'].apply(preprocessor.normalize_and_flatten)
     df['Label'] = pd.to_numeric(df['Label'], errors='coerce').fillna(0).astype(int)
 
-    # 2. 特征提取（DistilBERT）
-    embedder = SQLEmbedder()
+    # 2. 特征提取
+    extractor_type = "distilbert"
+    embedder = SQLEmbedder(
+        extractor_type=extractor_type,
+        model_name="distilbert-base-uncased",
+    )
     batch_size = 128 if torch.cuda.is_available() else 32
     embeddings = embedder.get_embeddings(df['ast_query'].values, batch_size=batch_size)
 
     # --- 训练相关参数 & RAG 参数 ---
-    mlp_train_hparams = {
-        "lr": 0.001,
-        "epochs": 15,
-        "batch_size": 32,
+    layer2_model_name = "lightgbm"
+    layer2_train_hparams = {
+        "learning_rate": 0.05,
+        "n_estimators": 300,
+        "num_leaves": 31,
+        "max_depth": -1,
+        "feature_fraction": 0.9,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 1,
+        "min_data_in_leaf": 20,
     }
     rag_params = {
-        "num_roles": 4,
-        "rag_threshold": 0.7,
-        "faiss_metric": "L2",
+        "num_roles": 8,  # 角色数量
+        "rag_threshold": 0.7, # RAG距离阈值
+        "faiss_metric": "L2", # 距离计算方式
     }
     num_roles = rag_params["num_roles"]
     rag_threshold = rag_params["rag_threshold"]
 
-    # 3. 划分训练集和测试集（全流程统一划分）
+    # 3. 划分训练集和测试集
     train_idx, test_idx = train_test_split(np.arange(len(df)), test_size=0.2, random_state=42)
     train_df = df.iloc[train_idx].reset_index(drop=True)
     test_df = df.iloc[test_idx].reset_index(drop=True)
     train_embeddings = embeddings[train_idx]
     test_embeddings = embeddings[test_idx]
 
-    # 4. 第一层训练（LOF，仅正常样本）
+    # 4. 第一层训练
     y_train_layer1 = train_df['Label'].apply(lambda x: 1 if x == 1 else 0).values
     X_train_normal = train_embeddings[y_train_layer1 == 0]
-    # 使用 LOF 模型
     l1_detector = Layer1Detector(model_name="lof")
     l1_detector.train(X_train_normal)
 
-    # 5. 第二层训练（MLP+RAG角色分类）
+    # 5. 第二层训练
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # 训练集中过滤掉注入(Label!=1)，用于角色分类与KB构建
     train_roles_mask = train_df['Label'] != 1
     X_train2 = train_embeddings[train_roles_mask]
-    y_train2 = train_df.loc[train_roles_mask, 'role'].values
+    
+    # 使用 LabelEncoder 确保角色标签在 [0, num_roles-1] 范围内
+    le = LabelEncoder()
+    y_train2 = le.fit_transform(train_df.loc[train_roles_mask, 'role'].values)
     labels_train2 = train_df.loc[train_roles_mask, 'Label'].values
 
-    # 构建FAISS角色知识库（仅Label==0）——调用 rag.py
+    # 构建FAISS角色知识库
     role_kb = build_role_knowledge_base_faiss_l2(
         X_train2, y_train2, labels_train2, num_roles
     )
 
-    # 训练时计算RAG Top-1 L2距离并拼接到embedding —— 调用 rag.py
+    # 训练时计算RAG Top-1 L2距离并拼接到embedding
     rag_features_train = []
     for emb in X_train2:
         rag_features_train.append(
@@ -87,32 +99,26 @@ def main():
     rag_features_train = np.array(rag_features_train)
     X_train2_rag = np.concatenate([X_train2, rag_features_train], axis=1)
 
-    X_train2_tensor = torch.tensor(X_train2_rag, dtype=torch.float32).to(device)
-    y_train2_tensor = torch.tensor(y_train2, dtype=torch.long).to(device)
+    # 第二层模型训练
+    X_train2_np = X_train2_rag.astype(np.float32)
+    y_train2_np = y_train2.astype(np.int64)
 
-    model = Layer2Classifier(model_name="mlp", num_roles=num_roles).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=mlp_train_hparams["lr"])
-    criterion = torch.nn.CrossEntropyLoss()
-    train_loader = torch.utils.data.DataLoader(
-        torch.utils.data.TensorDataset(X_train2_tensor, y_train2_tensor),
-        batch_size=mlp_train_hparams["batch_size"],
-        shuffle=True
+    input_dim_l2 = X_train2_np.shape[1]
+    layer2_clf = Layer2Classifier(
+        model_name=layer2_model_name,
+        input_dim=input_dim_l2,
+        num_roles=num_roles,
+        device=device,
     )
-    model.train()
 
-    loss_history = []
-    for epoch in range(mlp_train_hparams["epochs"]):
-        for batch_x, batch_y in train_loader:
-            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-            optimizer.zero_grad()
-            outputs = model(batch_x)
-            loss = criterion(outputs, batch_y)
-            loss.backward()
-            optimizer.step()
-            # 记录每个 batch 的 loss（可用 plot_loss_curve 可视化）
-            loss_history.append(loss.item())
+    print(f"正在训练第二层角色模型 (Model: {layer2_model_name}, Device: {device})...")
+    loss_history = layer2_clf.train(
+        X_train2_np,
+        y_train2_np,
+        training_hparams=layer2_train_hparams,
+        output_dir=None,
+    )
 
-    # 6. 测试集整体框架测试
     # 第一层检测
     y_test_layer1 = test_df['Label'].apply(lambda x: 1 if x == 1 else 0).values
     X_test = test_embeddings
@@ -129,21 +135,19 @@ def main():
     l2_roles_true = test_df.loc[l2_mask, 'role'].values
     l2_labels_true = test_df.loc[l2_mask, 'Label'].values
 
-    # 计算RAG特征，拼接后推理 —— 调用 rag.py
+    # 计算RAG特征，拼接后推理
     rag_features_test = []
     for emb in l2_embeddings:
         rag_features_test.append(
             get_top1_l2_distances_faiss(emb, role_kb, num_roles)
         )
     rag_features_test = np.array(rag_features_test)
-    l2_input = np.concatenate([l2_embeddings, rag_features_test], axis=1)
+    l2_input_np = np.concatenate([l2_embeddings, rag_features_test], axis=1).astype(np.float32)
 
-    model.eval()
-    with torch.no_grad():
-        l2_tensor = torch.tensor(l2_input, dtype=torch.float32).to(device)
-        outputs = model(l2_tensor)
-        _, l2_roles_pred = torch.max(outputs, 1)
-        l2_roles_pred = l2_roles_pred.cpu().numpy()
+    # 使用第二层分类器推理
+    layer2_clf_pred, _ = layer2_clf.predict(l2_input_np)
+    # 将模型输出的类索引转换回原始角色标记进行比较
+    l2_roles_pred = le.inverse_transform(layer2_clf_pred)
 
     # 基于RAG距离与角色匹配的最终判定
     final_l2_pred = []
@@ -158,7 +162,6 @@ def main():
     # 7. 统计整体准确率与分类报告
     true_label = test_df['Label'].values
 
-    # 说明：计算分层指标以便诊断
     overall_acc = accuracy_score(true_label, framework_pred)
 
     # 标签分布与第一层统计
@@ -172,7 +175,7 @@ def main():
     true_injection_mask = (true_label == 1).astype(int)
     # l1_result: 1 表示被判为注入
     first_layer_overall_acc = accuracy_score(true_injection_mask, l1_result)
-    # 对注入样本的召回（在所有真实注入样本中被第一层正确标注为注入的比例）
+    # 对注入样本的召回
     if np.sum(true_injection_mask) > 0:
         first_layer_injection_recall = np.sum((l1_result == 1) & (true_injection_mask == 1)) / np.sum(true_injection_mask)
     else:
@@ -180,10 +183,8 @@ def main():
 
     # 第二层（伪装 vs 正常）指标：仅在第一层通过的样本上计算
     if num_enter_l2 > 0:
-        # l2_labels_true: ground truth (0 or 2)
-        # final_l2_pred: final labels (0 or 2) for those samples
         second_layer_overall_acc = accuracy_score(l2_labels_true, final_l2_pred)
-        # 对伪装(Label==2)样本的召回（在进入第二层的真实伪装样本中被判为2的比例）
+        # 对伪装(Label==2)样本的召回
         mask_real_impersonation = (l2_labels_true == 2)
         if np.sum(mask_real_impersonation) > 0:
             second_layer_impersonation_recall = np.sum((np.array(final_l2_pred) == 2) & mask_real_impersonation) / np.sum(mask_real_impersonation)
@@ -213,19 +214,18 @@ def main():
     print("\n=== 详细分类报告（框架输出标签与真实标签） ===")
     print(classification_report(true_label, framework_pred, target_names=['正常', '注入', '伪装'], zero_division=0))
 
-    # 构造并写入实验报告（确保所有变量已初始化，避免 UnboundLocalError）
+    # 构造并写入实验报告
     timestamp_report = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir_report = os.path.join("notebooks", f"exp_main_{timestamp_report}")
     os.makedirs(output_dir_report, exist_ok=True)
     report_path = os.path.join(output_dir_report, 'experiment_report.txt')
 
 
-
     # 1) 混淆矩阵（整体框架）
     plot_confusion_matrix(true_label, framework_pred, output_dir_report, labels=['0', '1', '2'],
                           filename='confusion_matrix.png', title='Framework Confusion Matrix')
 
-    # 2) 第一层（孤立森林）分数分布与 ROC（以检测注入 Label==1 为正类）
+    # 2) 第一层分数分布与 ROC
     try:
         true_injection_mask = (true_label == 1).astype(int)
         plot_score_distribution(true_injection_mask, scores, output_dir_report,
@@ -235,7 +235,7 @@ def main():
     except Exception as e:
         print(f"绘制第一层分布/ROC 时出错: {e}")
 
-    # 3) RAG 相似度分布（将 L2 距离转换为相似度后绘图）
+    # 3) RAG 相似度分布
     try:
         # rag_features_train: shape (N_train2, num_roles)
         rag_sim_distributions = {r: [] for r in range(num_roles)}
@@ -248,7 +248,7 @@ def main():
     except Exception as e:
         print(f"绘制 RAG 相似度分布时出错: {e}")
 
-    # 4) 训练损失曲线（若有记录）
+    # 4) 训练损失曲线
     try:
         if len(loss_history) > 0:
             plot_loss_curve(loss_history, output_dir_report, filename='layer2_training_loss.png',
@@ -260,7 +260,7 @@ def main():
 
     title = "SQL Detection Framework Experiment Report"
 
-    # --- 由模型自己返回超参数字符串，main 只做拼接 ---
+    # 模型超参数
     try:
         l1_hyperparams_str = l1_detector.get_hyperparams_str()
     except Exception as e:
@@ -268,17 +268,18 @@ def main():
         l1_hyperparams_str = "Layer1: (failed to get hyperparams_str)"
 
     try:
-        # 第二层模型需要接受训练超参和 RAG 超参，内部自己决定如何展示
-        l2_hyperparams_str = model.get_hyperparams_str(
-            training_hparams=mlp_train_hparams,
-            rag_params=rag_params,
+        l2_hyperparams_str = layer2_clf.get_hyperparams_str(
+            training_hparams=layer2_train_hparams,
+            extra_params=rag_params,
         )
     except Exception as e:
         print(f"获取第二层超参数字符串失败: {e}")
         l2_hyperparams_str = "Layer2: (failed to get hyperparams_str)"
 
-    # --- 最终写入 txt 的 model_paras ---
+    # 写入txt
     model_paras = (
+        f"DataSet: {data_path}\n"
+        f"Feature Model: {extractor_type}\n"
         f"{l1_hyperparams_str}\n\n"
         f"{l2_hyperparams_str}\n\n"
         f"Train samples: {len(train_embeddings)}\n"

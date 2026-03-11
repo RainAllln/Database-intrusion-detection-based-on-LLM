@@ -1,40 +1,25 @@
-import torch
-import numpy as np
-from transformers import AutoTokenizer, AutoModel
-
-
 class SQLEmbedder:
-    def __init__(self, model_name="distilbert-base-uncased"):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name).to(self.device)
-        
-        # 打印明确的设备信息
-        if self.device.type == 'cuda':
-            print(f"模型利用 GPU 加速中: {torch.cuda.get_device_name(0)}")
-        else:
-            print("未检测到 GPU，正在使用 CPU")
+    """SQL 特征提取统一接口，内部根据 extractor_type 选择具体 LLM 模型"""
+    def __init__(self, extractor_type: str = "distilbert", **kwargs):
+        self.extractor = self._load_extractor(extractor_type, **kwargs)
 
-    def get_embeddings(self, texts, batch_size=16):
-        """捕捉SQL的深层语义特征"""
-        all_embeddings = []
-        
-        # 确保输入可迭代
-        if isinstance(texts, str):
-            texts = [texts]
-            
-        for i in range(0, len(texts), batch_size):
-            batch_texts = list(texts[i:i + batch_size])
-            inputs = self.tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=128).to(self.device)
-            
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                # 取 [CLS] token (位置0) 作为句向量
-                batch_embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
-                all_embeddings.append(batch_embeddings)
-        
-        if not all_embeddings:
-            return np.array([])
-            
-        return np.vstack(all_embeddings)
+    def _load_extractor(self, extractor_type: str, **kwargs):
+        """根据类型加载对应的特征提取器"""
+        if extractor_type == "distilbert":
+            from models.distilbert import DistilBERTFeatureExtractor
+            return DistilBERTFeatureExtractor(**kwargs)
+        elif extractor_type == "bert":
+            from models.bert import BERTFeatureExtractor
+            return BERTFeatureExtractor(**kwargs)
+        elif extractor_type == "roberta":
+            from models.roberta import RoBERTaFeatureExtractor
+            return RoBERTaFeatureExtractor(**kwargs)
+        elif extractor_type == "codebert":
+            from models.codebert import CodeBERTFeatureExtractor
+            return CodeBERTFeatureExtractor(**kwargs)
+        else:
+            raise ValueError(f"未知的特征提取器类型: {extractor_type}")
+
+    def get_embeddings(self, texts, batch_size: int = 16):
+        return self.extractor.get_embeddings(texts, batch_size=batch_size)
 

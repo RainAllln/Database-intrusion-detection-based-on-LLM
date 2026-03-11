@@ -4,7 +4,7 @@ import random
 import glob
 
 # 配置路径
-INPUT_DATA_PATH = '../data/raw/sqlInjection'  # 假设原始 SQLI 数据集在这里，如果是 CSV/TXT 文件
+INPUT_DATA_PATH = '../data/raw/sqlInjection'
 OUTPUT_DIR = '../data/custom'
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, 'custom_dataset.csv')
 

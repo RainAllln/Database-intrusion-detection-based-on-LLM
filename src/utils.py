@@ -2,6 +2,7 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
+import numpy as np
 from datetime import datetime
 from sklearn.metrics import confusion_matrix, roc_curve, roc_auc_score, classification_report
 
@@ -58,7 +59,7 @@ def plot_loss_curve(loss_history, output_dir, filename='training_loss.png', titl
 
 def plot_rag_similarity_distribution(rag_sim_distributions, output_dir, filename='rag_sim_distribution.png'):
     """
-    rag_sim_distributions: dict, key=role, value=list of similarity scores
+    rag 相似度分布
     """
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -75,7 +76,9 @@ def plot_rag_similarity_distribution(rag_sim_distributions, output_dir, filename
     print(f"RAG相似度分布图已保存: {save_path}")
 
 def to_camel_case(snake_str):
-    """将下划线命名法转换为驼峰命名法."""
+    """
+    下划线转换驼峰命名法
+    """
     components = snake_str.split('_')
     return components[0] + ''.join(x.title() for x in components[1:])
 
@@ -111,3 +114,32 @@ def write_detail_log(detail_path, df, preds, probs, rag_sims, pred_layer2, actua
                 f"{i:<5} | {actual_role:<10} | {pred_role:<10} | {res_mark:<8} | {confidence:.4f}     | {rag_sim:.4f}   | {query_clip:<55} | {pred_val:<5} | {actual_val:<6}\n")
     print(f"详细推理日志已写入: {detail_path}")
 
+def extract_manual_features(queries):
+    """
+    提取简单的人工统计特征，用于与 BERT 向量拼接。
+    特征包括：长度、特定关键词频次、特殊符号数量。
+    """
+    features = []
+    # 典型注入敏感词
+    keywords = ['union', 'select', 'from', 'where', 'or', 'and', '--', '#', '/*', '*/', '1=1']
+    
+    for sql in queries:
+        if not isinstance(sql, str):
+            sql = ""
+        sql_lower = sql.lower()
+        
+        row_feat = []
+        # 1. 长度特征 (归一化建议在外部做，这里存原始值)
+        row_feat.append(len(sql))
+        
+        # 2. 关键词计数
+        for kw in keywords:
+            row_feat.append(sql_lower.count(kw))
+            
+        # 3. 特殊符号比例
+        special_chars = sum(1 for c in sql if not c.isalnum() and not c.isspace())
+        row_feat.append(special_chars)
+        
+        features.append(row_feat)
+        
+    return np.array(features)
